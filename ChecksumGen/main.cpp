@@ -186,6 +186,24 @@ HANDLE SDCardOpen(const char* drive_name)
 		return INVALID_HANDLE_VALUE;
 	}
 
+	bResult = DeviceIoControl(hDevice, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &BytesReturned, NULL);
+	if (!bResult)
+	{
+		printf("Unable to unmount volume (err = %d).\n", GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	bResult = DeviceIoControl(hDevice, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &BytesReturned, NULL);
+	if (!bResult)
+	{
+		int err = GetLastError();
+		if (err != 158)
+		{
+			printf("Unable to lock volume (err = %d).\n", GetLastError());
+			return INVALID_HANDLE_VALUE;
+		}
+	}
+
 	CloseHandle(hDevice);
 
 
