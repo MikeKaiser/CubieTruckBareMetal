@@ -14,6 +14,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <Windows.h>
+#include <cstdint>
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -105,6 +108,11 @@ public:
 	{
 		return buf + bufLen;
 	}
+
+	int GetSize() const
+	{
+		return bufLen;
+	}
 };
 
 
@@ -141,12 +149,127 @@ u32 ComputeCheckSum(const Buffer & src)
 }
 
 
+
+
+// https://docs.microsoft.com/en-us/answers/questions/302450/how-to-write-to-sector-0-mbr-of-sd-card.html
+// https://stackoverflow.com/questions/6608466/how-to-writefile-to-a-physicaldrive-windows-7-without-getting-error-access-den
+// https://stackoverflow.com/questions/64018265/writing-usb-disk-sectors-results-in-permission-error-5
+HANDLE SDCardOpen(const char* drive_name)
+{
+	char   dev_name[128];
+	BOOL   bResult;
+	HANDLE hDevice;
+	DWORD  BytesReturned;
+	VOLUME_DISK_EXTENTS vde;
+
+	// drive_name example : "D:"
+
+	sprintf(dev_name, "\\\\.\\%s", drive_name);
+	hDevice = CreateFileA(dev_name,             // Drive to open
+		GENERIC_READ | GENERIC_WRITE,          // Access to the drive
+		FILE_SHARE_READ | FILE_SHARE_WRITE,    // Share mode
+		NULL,                                  // Security
+		OPEN_EXISTING,                         // Disposition
+		0,                                     // no file attributes
+		NULL);
+
+	if (hDevice == INVALID_HANDLE_VALUE)
+	{
+		printf("Can't open the drive %s (err = %d).\n", drive_name, GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	bResult = DeviceIoControl(hDevice, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &vde, sizeof(vde), &BytesReturned, NULL);
+	if (!bResult)
+	{
+		printf("Failed to get physical disk name (err = %d).\n", GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	CloseHandle(hDevice);
+
+
+	// Reopen the disk as a physical disk rather than a logical one
+	sprintf(dev_name, "\\\\.\\PhysicalDrive%d", vde.Extents[0].DiskNumber);
+
+	hDevice = CreateFileA(dev_name,            // Drive to open
+		GENERIC_READ | GENERIC_WRITE,          // Access to the drive
+		FILE_SHARE_READ | FILE_SHARE_WRITE,    // Share mode
+		NULL,                                  // Security
+		OPEN_EXISTING,                         // Disposition
+		0,                                     // no file attributes
+		NULL);
+
+	if (hDevice == INVALID_HANDLE_VALUE)
+	{
+		printf("Can't open the disk %s (err = %d).\n", dev_name, GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	bResult = DeviceIoControl(hDevice, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &BytesReturned, NULL);
+	if (!bResult)
+	{
+		printf("Failed to lock volume (err = %d).\n", GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	bResult = DeviceIoControl(hDevice, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &BytesReturned, NULL);
+	if (!bResult)
+	{
+		printf("Failed to dismount volume (err = %d).\n", GetLastError());
+		return INVALID_HANDLE_VALUE;
+	}
+
+	return hDevice;
+}
+
+int SDCardWrite(HANDLE hDevice, unsigned int sec, unsigned int num_secs, const unsigned char* buf)
+{
+	LARGE_INTEGER pos;
+	DWORD         cnt, wcnt;
+	BOOL          bResult;
+
+	pos.QuadPart = ((LONGLONG)sec) << 9;     // assume 512-byte sector
+	cnt = ((DWORD)num_secs) << 9;
+
+	bResult = SetFilePointerEx(hDevice, pos, NULL, FILE_BEGIN);
+	if (!bResult)
+	{
+		printf("SetFilePointerEx() failed (err = %d).\n", GetLastError());
+		return(-1);
+	}
+
+	bResult = WriteFile(hDevice, buf, cnt, &wcnt, NULL);
+	if (!bResult || cnt != wcnt)
+	{
+		printf("WriteFile() failed (err = %d).\n", GetLastError());
+		return(-1);
+	}
+
+	return(0);
+}
+
+void WriteToSDCard(const char* sdcard, const Buffer & buf)
+{
+	HANDLE h = SDCardOpen(sdcard);
+	if (h != INVALID_HANDLE_VALUE)
+	{
+		SDCardWrite(h, 0, buf.GetSize() / 512, (const unsigned char *)buf.GetBaseAddr() );
+		CloseHandle(h);
+	}
+}
+
+
+
 int main( int argc, char * argv [] )
 {
 	Buffer src;
 	if (argc < 3)
 	{
-		printf("Usage: ChecksumGen <infile> <outfile>\n\n");
+		printf("Usage: ChecksumGen    <infile> <outfile>\n\n");
+		printf("Usage: ChecksumGen -w <infile> <sdcard>\n");
+		printf("                      write to SD Card directly\n\n");
+
 		printf("Example:\n");
 		printf("  arm-none-eabi-as.exe -o out.elf main.s\n");
 		printf("  arm-none-eabi-objcopy.exe -O binary out.elf out.bin\n");
@@ -155,7 +278,18 @@ int main( int argc, char * argv [] )
 		return 0;
 	}
 
-	FILE * fp = fopen(argv[1], "rb");
+	int inFileIdx = 1;
+	int outFileIdx = 2;
+	bool writeToSDCard = false;
+
+	if (!strcmp(argv[1], "-w"))
+	{
+		inFileIdx++;
+		outFileIdx++;
+		writeToSDCard = true;
+	}
+
+	FILE * fp = fopen(argv[inFileIdx], "rb");
 	if (fp != nullptr)
 	{
 		src.Read(fp);
@@ -173,18 +307,24 @@ int main( int argc, char * argv [] )
 	header->check_sum = 0x5F0A6C39;
 	header->check_sum = ComputeCheckSum(src);
 
-
-	fp = fopen(argv[2], "wb");
-	if (fp != nullptr)
+	if (!writeToSDCard)
 	{
-		int size = src.WriteFATHeader(fp);
-		src.Write(fp, 0x2000 - size);
-		fclose(fp);
+		fp = fopen(argv[outFileIdx], "wb");
+		if (fp != nullptr)
+		{
+			int size = src.WriteFATHeader(fp);
+			src.Write(fp, 0x2000 - size);
+			fclose(fp);
+		}
+		else
+		{
+			printf("Unable to open destination file\n");
+			return 0;
+		}
 	}
 	else
 	{
-		printf( "Unable to open destination file\n" );
-		return 0;
+		WriteToSDCard( argv[outFileIdx], src );
 	}
 
 	return 1;
