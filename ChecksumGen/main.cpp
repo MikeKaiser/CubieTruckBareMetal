@@ -141,9 +141,19 @@ u32 ComputeCheckSum(const Buffer & src)
 }
 
 
-void main( int argc, char * argv [] )
+int main( int argc, char * argv [] )
 {
 	Buffer src;
+	if (argc < 3)
+	{
+		printf("Usage: ChecksumGen <infile> <outfile>\n\n");
+		printf("Example:\n");
+		printf("  arm-none-eabi-as.exe -o out.elf main.s\n");
+		printf("  arm-none-eabi-objcopy.exe -O binary out.elf out.bin\n");
+		printf("  ChecksumGen.exe out.bin out.raw\n\n");
+		printf("  You should now be able to write out.raw to an SD card that will boot your device.\n");
+		return 0;
+	}
 
 	FILE * fp = fopen(argv[1], "rb");
 	if (fp != nullptr)
@@ -154,7 +164,7 @@ void main( int argc, char * argv [] )
 	else
 	{
 		printf( "Unable to open source file\n" );
-		return;
+		return 0;
 	}
 
 	Header * header = (Header *)(src.GetBaseAddr());
@@ -174,6 +184,8 @@ void main( int argc, char * argv [] )
 	else
 	{
 		printf( "Unable to open destination file\n" );
-		return;
+		return 0;
 	}
+
+	return 1;
 }
